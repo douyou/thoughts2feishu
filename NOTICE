@@ -1,0 +1,14 @@
+Third-Party Notices
+===================
+
+This repository includes a modified copy of the Thoughts export tool:
+
+  Project : thoughtsexport
+  Upstream: https://github.com/marknown/thoughtsexport
+
+The upstream project is used to export documents from Alibaba Cloud Thoughts
+(thoughts.aliyun.com / thoughts.teambition.com). Local changes may include
+Cookie-based export helpers and path-segment sanitization.
+
+Please review the upstream repository for the original license and attribution
+requirements before redistribution.
