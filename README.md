@@ -104,21 +104,26 @@ cp .env.example .env
 # 编辑 .env：FEISHU_APP_ID / FEISHU_APP_SECRET / 父节点 / space_id / 导出目录
 ```
 
-### 3.2 user_access_token（仅打 L2 需要）
+### 3.2 user_access_token（打 L2 密级）
 
-应用身份 **无法** 开通 `docs:secure_label:write_only` 时，必须用人的 token：
+应用身份 **无法** 写入文档密级，必须用**用户身份**。导入脚本 `feishu_import_v2.py` 会在每个节点导入完成后**自动打 L2**。
 
-1. 开放平台 → 你的应用 → **安全设置 / 免登** 等相关能力（按当前控制台指引配置重定向 URL）。
-2. 走 [获取 user_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/get-user-access-token) 流程（OAuth 授权码 → user_access_token）。
-3. 把 token 写入 `.env` 的 `FEISHU_USER_ACCESS_TOKEN=`，或本地文件 `.feishu_user_token`（已在 `.gitignore`）。
-4. **会过期**。长任务导入可先不传 user token；导入完成后再刷新 token，执行 `scripts/set_l2_batch.py`。
+用户身份来源（按优先级）：
 
-自检：
+1. `.env` 的 `FEISHU_USER_ACCESS_TOKEN=`，或本地 `.feishu_user_token`（已在 `.gitignore`）
+2. 本机 **lark-cli** 已登录用户（需含 `docs:secure_label:write_only` scope）
+
+若使用 lark-cli，一般无需手动复制 token：
 
 ```bash
-curl -s -H "Authorization: Bearer $FEISHU_USER_ACCESS_TOKEN" \
-  https://open.feishu.cn/open-apis/authen/v1/user_info
+lark-cli auth login --scope docs:secure_label:write_only --no-wait --json
+# 按提示完成授权后
+lark-cli auth login --device-code <device_code>
 ```
+
+密级 ID：配置 `FEISHU_SECURE_LABEL_L2_ID`；留空时脚本会经 lark-cli 按 `FEISHU_SECURE_LABEL_L2_NAME`（默认 `L2-内部级`）自动查询。
+
+也可手动走 [OAuth 获取 user_access_token](https://open.feishu.cn/document/server-docs/authentication-management/access-token/get-user-access-token)，写入 `.feishu_user_token`。**会过期**，过期后刷新 lark-cli 登录或更新 token 文件即可。
 
 ### 3.3 云效 Thoughts Cookie
 
@@ -226,17 +231,47 @@ pip3 install -r requirements.txt
 
 ## 六、批量打 L2 密级
 
+导入时通常已自动打标；补跑或重试失败节点：
+
 ```bash
-# 确保 .env 里 FEISHU_USER_ACCESS_TOKEN 有效
 set -a && source .env && set +a
 python3 scripts/set_l2_batch.py --state "$FEISHU_STATE_PATH"
 ```
 
-密级 ID 默认读 `FEISHU_SECURE_LABEL_L2_ID`（示例为内部级，以你们租户配置为准）。
+用户身份：优先 `FEISHU_USER_ACCESS_TOKEN` / `.feishu_user_token`，否则自动使用本机 lark-cli 用户登录态。密级 ID 优先 `FEISHU_SECURE_LABEL_L2_ID`，否则按 `FEISHU_SECURE_LABEL_L2_NAME`（默认 `L2-内部级`）经 lark-cli 查询。
 
 ---
 
-## 七、清理与重导
+## 七、批量转移文档所有者（机器人 → 你自己）
+
+导入后文档所有者默认是应用机器人，别人申请权限时通知常到不了真人。可用官方 [转移云文档所有者](https://open.feishu.cn/document/server-docs/docs/permission/permission-member/transfer_owner) 批量改掉。
+
+前置：
+
+1. 开放平台开通并发布 `docs:permission.member:transfer`（或控制台里「转移云文档所有权」）。
+2. `.env` 填好 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`。
+3. 新所有者：`FEISHU_NEW_OWNER_OPEN_ID=ou_xxx`，或提供有效的 `FEISHU_USER_ACCESS_TOKEN`（脚本会调 `/authen/v1/user_info` 解析）。
+
+```bash
+set -a && source .env && set +a
+
+# 先 dry-run 看数量
+python3 scripts/transfer_owner_batch.py \
+  --parent <资讯平台节点token> \
+  --parent <生态营销导入根节点token> \
+  --dry-run
+
+# 确认后正式转移（默认保留机器人可管理权限，且不逐条通知）
+python3 scripts/transfer_owner_batch.py \
+  --parent <资讯平台节点token> \
+  --parent <生态营销导入根节点token>
+```
+
+说明：默认只转 `--parent` 下的**子孙节点**，不含 parent 本身（避免误转「后端组」）。若也要转导入根页面，加 `--include-roots`。接口约 100 次/分钟，几百篇大约数分钟。
+
+---
+
+## 八、清理与重导
 
 飞书 Wiki **没有**稳定的「删除节点」OpenAPI。实务做法：
 

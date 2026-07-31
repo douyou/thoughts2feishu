@@ -384,3 +384,32 @@ func (r *request) GetDownloadUrlByDetail(hash string, prefixPath string) (*NodeD
 
 	return nodeDownload, nil
 }
+
+// GetNodeTitle 读取节点标题（用于修复 docx 内链显示文本）。
+func GetNodeTitle(cookie, workspaceID, baseURL, nodeID string) (string, error) {
+	r := NewRequestWithBase(cookie, workspaceID, baseURL)
+	return r.getNodeTitle(nodeID)
+}
+
+func (r *request) getNodeTitle(nodeID string) (string, error) {
+	req := ohttp.InitSetttings()
+	req.Timeout = 10 * time.Second
+	req.IsAajx = true
+	req.Referer = r.baseURL
+	req.Cookies = r.cookie
+
+	url := fmt.Sprintf("%s/api/workspaces/%s/nodes/%s?pageSize=1000&_=%d", r.baseURL, r.firstHash, nodeID, utils.UnixTimstampMillisecond())
+	content, _, err := req.Get(url)
+	if err != nil {
+		return "", err
+	}
+	var result Node
+	if err := utils.JSONToStruct(content, &result); err != nil {
+		return "", err
+	}
+	title := strings.TrimSpace(result.Title)
+	if title == "" {
+		return "", fmt.Errorf("empty title for node %s", nodeID)
+	}
+	return title, nil
+}

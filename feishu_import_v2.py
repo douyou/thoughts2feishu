@@ -21,6 +21,13 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 from lxml import etree
 
+from feishu_secure_label import (
+    load_user_access_token,
+    resolve_l2_label_id,
+    resolve_user_auth_mode,
+    set_secure_label_l2 as apply_secure_label_l2,
+)
+
 _BASE = Path(__file__).resolve().parent
 
 # 可通过环境变量切换目标（不同知识库 / 不同导出目录）
@@ -36,11 +43,26 @@ CLEAN_ROOT_TITLE = os.environ.get("FEISHU_CLEAN_ROOT_TITLE", "")
 
 APP_ID = os.environ.get("FEISHU_APP_ID", "")
 APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
-USER_ACCESS_TOKEN = os.environ.get("FEISHU_USER_ACCESS_TOKEN", "").strip()
+USER_ACCESS_TOKEN = load_user_access_token(_BASE)
 
 # L2-内部级（仅用户身份可写密级；应用身份通常无密级写权限）
-# 以你们租户实际密级 ID 为准；不确定时可留空并在 .env 中配置
+# 以你们租户实际密级 ID 为准；留空时尝试经 lark-cli 按名称解析
 SECURE_LABEL_L2_ID = os.environ.get("FEISHU_SECURE_LABEL_L2_ID", "").strip()
+
+_L2_RUNTIME: Dict[str, Any] = {}
+
+
+def _l2_user_auth() -> Tuple[str, str]:
+    user = USER_ACCESS_TOKEN
+    return resolve_user_auth_mode(user), user
+
+
+def _l2_label_id() -> str:
+    if _L2_RUNTIME.get("l2_id"):
+        return _L2_RUNTIME["l2_id"]
+    l2_id = resolve_l2_label_id(label_id=SECURE_LABEL_L2_ID)
+    _L2_RUNTIME["l2_id"] = l2_id
+    return l2_id
 
 IMPORT_SIZE_LIMIT = 18 * 1024 * 1024
 API = "https://open.feishu.cn/open-apis"
@@ -301,27 +323,27 @@ def ensure_sub_page_list(fs: Feishu, wiki_token: str) -> None:
     log(f"sub_page_list ok: {wiki_token}")
 
 
+def _l2_runtime() -> Tuple[str, str, str]:
+    """返回 (l2_id, auth_mode, user_token)；不可用时 auth_mode=none。"""
+    mode, user = _l2_user_auth()
+    if mode == "none":
+        return "", mode, user
+    return _l2_label_id(), mode, user
+
+
 def set_secure_label_l2(fs: Feishu, wiki_token: str) -> None:
-    """用户身份将文档密级设为 L2-内部级。无 user token 时静默跳过。"""
-    if not fs.user_access_token:
+    """用户身份将文档密级设为 L2-内部级。无 user token 且无 lark-cli 时静默跳过。"""
+    l2_id, mode, user = _l2_runtime()
+    if mode == "none":
         return
-    if not SECURE_LABEL_L2_ID:
-        raise RuntimeError("缺少 FEISHU_SECURE_LABEL_L2_ID")
-    # get_node 用应用身份即可；打标必须用用户身份
-    node = get_wiki_node(fs, wiki_token)
-    obj_token = node.get("obj_token") or ""
-    obj_type = node.get("obj_type") or "docx"
-    if not obj_token:
-        raise RuntimeError(f"no obj_token for {wiki_token}")
-    resp = fs.user_request(
-        "PATCH",
-        f"/drive/v2/files/{obj_token}/secure_label",
-        params={"type": obj_type},
-        json_body={"id": SECURE_LABEL_L2_ID},
+    apply_secure_label_l2(
+        fs.ensure_token(),
+        wiki_token,
+        l2_id=l2_id,
+        user_token=user,
+        auth_mode=mode,  # type: ignore[arg-type]
     )
-    if resp.get("code") != 0:
-        raise RuntimeError(f"set L2 failed: {wiki_token} {resp}")
-    log(f"L2 ok: {wiki_token}")
+    log(f"L2 ok ({mode}): {wiki_token}")
 
 
 def finalize_wiki_node(
@@ -860,21 +882,35 @@ def main() -> None:
         log("已清空 v2 状态，准备全新导入")
 
     fs = Feishu(APP_ID, APP_SECRET, USER_ACCESS_TOKEN)
+    l2_mode, _ = _l2_user_auth()
     if APP_ID and APP_SECRET:
-        auth = "tenant_access_token(+user for L2)" if USER_ACCESS_TOKEN else "tenant_access_token"
+        if l2_mode == "none":
+            auth = "tenant_access_token"
+        elif l2_mode == "lark-cli":
+            auth = "tenant_access_token(+lark-cli for L2)"
+        else:
+            auth = "tenant_access_token(+user for L2)"
     else:
         auth = "user_access_token"
-    if not USER_ACCESS_TOKEN:
+    if l2_mode == "none":
         log(
-            "[WARN] 未设置 FEISHU_USER_ACCESS_TOKEN：将无法打 L2 密级"
-            "（docs:secure_label 仅用户身份可用）"
+            "[WARN] 无法打 L2 密级：请配置 FEISHU_USER_ACCESS_TOKEN / .feishu_user_token，"
+            "或 lark-cli 用户登录（docs:secure_label:write_only）"
         )
     probe = fs.request(
         "GET", "/wiki/v2/spaces/get_node", params={"token": PARENT_WIKI_TOKEN}
     )
     if probe.get("code") != 0:
         raise RuntimeError(f"无法访问目标父节点: {probe}")
-    log(f"鉴权成功 auth={auth} node={probe['data']['node']['title']} L2={SECURE_LABEL_L2_ID}")
+    l2_display = SECURE_LABEL_L2_ID or (
+        os.environ.get("FEISHU_SECURE_LABEL_L2_NAME", "L2-内部级")
+        if l2_mode != "none"
+        else ""
+    )
+    log(
+        f"鉴权成功 auth={auth} node={probe['data']['node']['title']} "
+        f"L2={l2_display or 'disabled'}"
+    )
 
     if not skip_probe:
         probe_import_permission(fs)
